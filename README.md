@@ -32,7 +32,7 @@ Image denoising based on deep learning has become a powerful tool to accelerate 
 The following is made available on [Google Drive](https://drive.google.com/drive/folders/1-8sBlpvkKVkwrZsZqnPQbU1ozrUXSxOo):
 
 + 3 pre-trained models, used to run the example (`/models/*.zip`)
-+ Sample test input data, used to run the example (`/data/\[interim|sure\]/rt_test.zip`)
++ Sample test input data, used to run the example (`/data/[interim|sure]/rt_test.zip`)
 + The entire training dataset (`/data/raw/training.zip`, ~3GB)
 + The entire testing dataset (`/data/raw/testing.zip`, ~3GB)
 
