@@ -1,0 +1,3 @@
+[submodule "oidn"]
+	path = oidn
+	url = https://github.com/OpenImageDenoise/oidn

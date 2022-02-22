@@ -1,0 +1,1146 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 50d07e4..eb8996c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,7 +20,7 @@ set(CMAKE_C_STANDARD 99)
+ set(CMAKE_C_STANDARD_REQUIRED ON)
+ set(CMAKE_C_EXTENSIONS OFF)
+ 
+-set(CMAKE_CXX_STANDARD 11)
++set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
+ 
+diff --git a/apps/CMakeLists.txt b/apps/CMakeLists.txt
+index e7f30e0..4995309 100644
+--- a/apps/CMakeLists.txt
++++ b/apps/CMakeLists.txt
+@@ -3,12 +3,15 @@
+ 
+ add_subdirectory(utils)
+ 
++find_package(OpenImageIO CONFIG REQUIRED)
++
+ macro(oidn_add_app APP_NAME)
+   add_executable(${APP_NAME} ${ARGN} ${OIDN_RESOURCE})
+-  target_link_libraries(${APP_NAME} PRIVATE common utils ${PROJECT_NAME})
++  target_link_libraries(${APP_NAME} PRIVATE common utils stdc++fs OpenImageIO::OpenImageIO ${PROJECT_NAME})
+   install(TARGETS ${APP_NAME} DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT apps)
+ endmacro()
+ 
+ oidn_add_app(oidnDenoise oidnDenoise.cpp)
+ oidn_add_app(oidnBenchmark oidnBenchmark.cpp)
+-oidn_add_app(oidnTest oidnTest.cpp catch.hpp)
+\ No newline at end of file
++oidn_add_app(oidnTest oidnTest.cpp catch.hpp)
++oidn_add_app(oidnSure oidnSure.cpp)
+\ No newline at end of file
+diff --git a/apps/oidnSure.cpp b/apps/oidnSure.cpp
+new file mode 100644
+index 0000000..c208179
+--- /dev/null
++++ b/apps/oidnSure.cpp
+@@ -0,0 +1,148 @@
++#include <OpenImageDenoise/oidn.hpp>
++#include <OpenImageIO/imageio.h>
++#include <OpenImageIO/imagebufalgo.h>
++#include <string>
++#include <filesystem>
++#include <iostream>
++#include <math.h>
++#include <random>
++
++#include "apps/utils/arg_parser.h"
++
++using namespace oidn;
++using namespace OIIO;
++namespace fs = std::filesystem;
++
++int main(int argc, char* argv[])
++{
++  std::string input_dir, output_dir;
++  bool use_aov = false;
++  int sure_iterations = 4;
++
++  ArgParser args(argc, argv);
++  while (args.hasNext())
++  {
++    std::string opt = args.getNextOpt();
++    if (opt == "input-dir")
++    {
++      input_dir = args.getNextValue();
++    }
++    else if (opt == "output-dir")
++    {
++      output_dir = args.getNextValue();
++    }
++    else if (opt == "use-aov")
++    {
++      use_aov = (bool) args.getNextValueInt();
++    }
++    else if (opt == "sure-iterations")
++    {
++      sure_iterations = args.getNextValueInt();
++    }
++  }
++
++  DeviceRef device = newDevice();
++  device.commit();
++
++  FilterRef filter = device.newFilter("RT");
++  filter.set("hdr", true);
++
++  std::random_device rd;
++  std::mt19937 gen(rd());
++  std::normal_distribution<float> std_nrm(0.f, 1.f);
++
++  for(const auto& entry : fs::directory_iterator(input_dir))
++  {
++    if (auto str = entry.path().u8string(); str.substr(str.size()-7) != "spp.exr")
++      continue;
++
++    std::cout << entry.path() << std::endl;
++
++    auto buf = ImageBuf(entry.path().u8string());
++    buf.read(0, 0, true, TypeDesc::FLOAT);
++    auto spec = buf.spec();
++
++    auto idx = [&spec](const std::string& ch) -> int
++    {
++      for(int i = 0;;++i)
++        if (spec.channelnames[i] == ch)
++          return i;
++    };
++
++    auto color = ImageBufAlgo::channels(buf, 3,
++      {idx("R"), idx("G"), idx("B")});
++    auto albedo = ImageBufAlgo::channels(buf, 3,
++      {idx("Albedo.R"), idx("Albedo.B"), idx("Albedo.G")});
++    auto normal = ImageBufAlgo::channels(buf, 3,
++      {idx("Normal.X"), idx("Normal.Y"), idx("Normal.Z")});
++    auto variance = ImageBufAlgo::channels(buf, 3,
++      {idx("Variance.R"), idx("Variance.G"), idx("Variance.B")});
++
++    auto denoised = ImageBuf(color.spec());
++
++    filter.setImage("color", color.localpixels(), Format::Float3, spec.width, spec.height);
++    if (use_aov)
++    {
++      filter.setImage("albedo", albedo.localpixels(), Format::Float3, spec.width, spec.height);
++      filter.setImage("normal", normal.localpixels(), Format::Float3, spec.width, spec.height);
++    }
++    filter.setImage("output", denoised.localpixels(), Format::Float3, spec.width, spec.height);
++
++    filter.commit();
++    filter.execute();
++
++    auto sure = ImageBuf(color.spec());
++    for (int i = 0; i < 3 * spec.width * spec.height; ++i)
++        static_cast<float*>(sure.localpixels())[i] = 0.f;
++
++    float* perturbed_color = new float[3 * spec.width * spec.height];
++    float* perturbed_output = new float[3 * spec.width * spec.height];
++    float* b = new float[3 * spec.width * spec.height];
++    float eps = 1e-4;
++    for (int iter = 0; iter < sure_iterations; ++iter)
++    {
++      for (int i = 0; i < 3 * spec.width * spec.height; ++i)
++      {
++        float var = static_cast<float*>(variance.localpixels())[i];
++        var = (!isnormal(var) || isnan(var)) ? 0.f : var;
++        b[i] = std_nrm(gen) * sqrtf(var);
++        perturbed_color[i] = static_cast<float*>(color.localpixels())[i] + eps * b[i];
++      }
++
++      filter.setImage("color", (void*)perturbed_color, Format::Float3, spec.width, spec.height);
++      filter.setImage("output", (void*)perturbed_output, Format::Float3, spec.width, spec.height);
++
++      filter.commit();
++      filter.execute();
++
++      for (int i = 0; i < 3 * spec.width * spec.height; ++i)
++      {
++        static_cast<float*>(sure.localpixels())[i] += b[i] *
++          (perturbed_output[i] - static_cast<float*>(denoised.localpixels())[i]);
++      }
++    }
++    for (int i = 0; i < 3 * spec.width * spec.height; ++i)
++    {
++      float& s = static_cast<float*>(sure.localpixels())[i];
++      s *= 2. / (eps * sure_iterations);
++
++      float x = static_cast<float*>(denoised.localpixels())[i] -
++        static_cast<float*>(color.localpixels())[i];
++      float var = static_cast<float*>(variance.localpixels())[i];
++        var = (!isnormal(var) || isnan(var)) ? 0.f : var;
++      s += x * x - var;
++    }
++    delete[] b;
++    delete[] perturbed_output;
++    delete[] perturbed_color;
++
++    std::string filename = entry.path().filename().u8string();
++    filename.resize(filename.size()-4);
++    filename += use_aov ? ".oidn_alb_nrm" : ".oidn";
++
++    denoised.write(output_dir + "/" + filename + ".hdr.exr", TypeDesc::HALF);
++    sure.write(output_dir + "/" + filename + ".sure.exr", TypeDesc::HALF);
++  }
++
++  return 0;
++}
+\ No newline at end of file
+diff --git a/training/color.py b/training/color.py
+index c102469..b563053 100644
+--- a/training/color.py
++++ b/training/color.py
+@@ -18,8 +18,8 @@ def luminance(r, g, b):
+ 
+ class TransferFunction: pass
+ 
+-def get_transfer_function(cfg):
+-  type = cfg.transfer
++def get_transfer_function(cfg, feature=None):
++  type = cfg.features_transfer[feature] if feature else cfg.transfer
+   if type == 'linear':
+     return LinearTransferFunction()
+   elif type == 'srgb':
+@@ -28,6 +28,8 @@ def get_transfer_function(cfg):
+     return PUTransferFunction()
+   elif type == 'log':
+     return LogTransferFunction()
++  elif type == 'atan':
++    return AtanTransferFunction()
+   else:
+     error('invalid transfer function')
+ 
+@@ -130,6 +132,17 @@ class LogTransferFunction(TransferFunction):
+   def inverse(self, x):
+     return log_inverse(x / LOG_NORM_SCALE)
+ 
++## -----------------------------------------------------------------------------
++## Transfer function: Atan
++## -----------------------------------------------------------------------------
++
++class AtanTransferFunction(TransferFunction):
++  def forward(self, y):
++    return torch.atan(y)
++
++  def inverse(self, x):
++    return torch.tan(x)
++
+ ## -----------------------------------------------------------------------------
+ ## Autoexposure
+ ## -----------------------------------------------------------------------------
+@@ -191,4 +204,4 @@ def tonemap(x):
+   def eval(x):
+     return ((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F))-E/F
+ 
+-  return torch.clamp(eval(x * scale) / eval(W), max=1.)
+\ No newline at end of file
++  return torch.clamp(eval(x * scale) / eval(W), max=1.)
+diff --git a/training/config.py b/training/config.py
+index 4461aeb..df1c580 100644
+--- a/training/config.py
++++ b/training/config.py
+@@ -1,6 +1,6 @@
+ ## Copyright 2018-2021 Intel Corporation
+ ## SPDX-License-Identifier: Apache-2.0
+-
++import json
+ import os
+ import sys
+ import argparse
+@@ -55,7 +55,8 @@ def parse_args(cmd=None, description=None):
+ 
+   if cmd in {'preprocess', 'train', 'find_lr'}:
+     parser.add_argument('features', type=str, nargs='*',
+-                        choices=['hdr', 'ldr', 'sh1', 'albedo', 'alb', 'normal', 'nrm', []],
++                        choices=['hdr', 'ldr', 'sh1', 'albedo', 'alb', 'normal', 'nrm',
++                                 'variance', 'var', 'denoised', 'den', 'sure', []],
+                         help='set of input features')
+     parser.add_argument('--clean_aux', action='store_true',
+                         help='train with noise-free (reference) auxiliary features')
+@@ -67,8 +68,10 @@ def parse_args(cmd=None, description=None):
+     parser.add_argument('--train_data', '-t', type=str,
+                         help='name of the training dataset')
+     advanced.add_argument('--transfer', '-x', type=str,
+-                          choices=['linear', 'srgb', 'pu', 'log'],
++                          choices=['linear', 'srgb', 'pu', 'log', 'atan'],
+                           help='transfer function')
++    advanced.add_argument('--features-transfer', '-X', type=str, default=None,
++                          help='per feature transform functions (json dict syntax)')
+ 
+   if cmd in {'preprocess', 'train'}:
+     parser.add_argument('--valid_data', '-v', type=str,
+@@ -87,6 +90,8 @@ def parse_args(cmd=None, description=None):
+   if cmd in {'infer'}:
+     parser.add_argument('--aux_results', '-a', type=str, nargs='*', default=[],
+                         help='prefilter auxiliary features using the specified training results')
++    advanced.add_argument('--compute-sure', type=bool, default=False)
++    advanced.add_argument('--sure-mc-iterations', type=int, default=4)
+ 
+   if cmd in {'train', 'infer', 'export'}:
+     parser.add_argument('--num_epochs', '--epochs', '-e', type=int,
+@@ -116,9 +121,9 @@ def parse_args(cmd=None, description=None):
+                         help='mini-batch size (total batch size of all devices)')
+     parser.add_argument('--num_loaders', '--loaders', '-j', type=int, default=4,
+                         help='number of data loader threads per device')
+-    parser.add_argument('--precision', '-p', type=str, choices=['fp32', 'mixed'],
++    parser.add_argument('--precision', '-p', type=str, choices=['fp32', 'mixed'], default='fp32',
+                         help='training precision')
+-    advanced.add_argument('--model', '-m', type=str, choices=['unet'], default='unet',
++    advanced.add_argument('--model', '-m', type=str, choices=['unet', 'pdnet', 'kpcn'], default='unet',
+                           help='network model')
+     advanced.add_argument('--loss', '-l', type=str,
+                           choices=['l1', 'mape', 'smape', 'l2', 'ssim', 'msssim', 'l1_msssim', 'l1_grad'],
+@@ -126,10 +131,11 @@ def parse_args(cmd=None, description=None):
+                           help='loss function')
+     advanced.add_argument('--msssim_weights', type=float, nargs='*',
+                           help='MS-SSIM scale weights')
+-    advanced.add_argument('--tile_size', '--ts', type=int, default=256,
++    advanced.add_argument('--tile_size', '--ts', type=int, default=128,
+                           help='size of the cropped image tiles')
+     advanced.add_argument('--seed', '-s', type=int,
+                           help='seed for random number generation')
++    advanced.add_argument('--shuffle-den', type=bool, default=True)
+ 
+   if cmd in {'infer', 'compare_image'}:
+     parser.add_argument('--metric', '-M', type=str, nargs='*',
+@@ -147,6 +153,7 @@ def parse_args(cmd=None, description=None):
+                         help='output image formats')
+     parser.add_argument('--save_all', action='store_true',
+                         help='save input and target images too')
++    advanced.add_argument('--output-interim-features', type=bool, default=False)
+ 
+   if cmd in {'export'}:
+     parser.add_argument('target', type=str, nargs='?',
+@@ -201,14 +208,21 @@ def parse_args(cmd=None, description=None):
+       warning('filter not specified, using generic default arguments')
+ 
+     # Replace feature names with IDs
+-    FEATURE_IDS = {'albedo' : 'alb', 'normal' : 'nrm'}
++    FEATURE_IDS = {'albedo' : 'alb', 'normal' : 'nrm', 'variance' : 'var', 'denoised' : 'den'}
+     cfg.features = [FEATURE_IDS.get(f, f) for f in cfg.features]
+     # Remove duplicate features
+     cfg.features = list(dict.fromkeys(cfg.features).keys())
+ 
++    main_feature = get_main_feature(cfg.features)
++    if cfg.features_transfer:
++      cfg.features_transfer = json.loads(cfg.features_transfer)
++      if main_feature in cfg.features_transfer:
++        cfg.transfer = cfg.features_transfer[main_feature]
++      elif cfg.transfer is None:
++        cfg.transfer = 'linear'
++
+     # Set the default transfer function
+     if cfg.transfer is None:
+-      main_feature = get_main_feature(cfg.features)
+       if main_feature == 'hdr':
+         cfg.transfer = 'log' if cfg.filter == 'RTLightmap' else 'pu'
+       elif main_feature in {'ldr', 'alb'}:
+@@ -216,6 +230,11 @@ def parse_args(cmd=None, description=None):
+       else:
+         cfg.transfer = 'linear'
+ 
++    if cfg.features_transfer:
++      cfg.features_transfer[main_feature] = cfg.transfer
++    else:
++      cfg.features_transfer = {main_feature : cfg.transfer}
++
+     # Set the default datasets
+     if cfg.train_data is None and (cmd == 'find_lr' or cfg.valid_data is None):
+       cfg.train_data = 'train'
+@@ -248,4 +267,4 @@ def parse_args(cmd=None, description=None):
+   # Print PyTorch version
+   print('PyTorch:', torch.__version__)
+ 
+-  return cfg
+\ No newline at end of file
++  return cfg
+diff --git a/training/dataset.py b/training/dataset.py
+index 714a99d..cbf01f1 100644
+--- a/training/dataset.py
++++ b/training/dataset.py
+@@ -1,4 +1,4 @@
+-## Copyright 2018-2021 Intel Corporation
++  ## Copyright 2018-2021 Intel Corporation
+ ## SPDX-License-Identifier: Apache-2.0
+ 
+ import os
+@@ -14,6 +14,7 @@ from config import *
+ from util import *
+ from image import *
+ from color import *
++from split_exr import list_exr_features, FEATURES
+ import tza
+ 
+ # Returns the ordered list of channel names for the specified features
+@@ -22,6 +23,8 @@ def get_channels(features, target):
+   channels = []
+   if 'hdr' in features:
+     channels += ['hdr.r', 'hdr.g', 'hdr.b']
++  if 'den' in features:
++    channels += ['den.r', 'den.g', 'den.b']
+   if 'ldr' in features:
+     channels += ['ldr.r', 'ldr.g', 'ldr.b']
+   if 'sh1' in features:
+@@ -33,6 +36,10 @@ def get_channels(features, target):
+     channels += ['alb.r', 'alb.g', 'alb.b']
+   if 'nrm' in features:
+     channels += ['nrm.x', 'nrm.y', 'nrm.z']
++  if 'var' in features:
++    channels += ['var.r', 'var.g', 'var.b']
++  if 'sure' in features:
++    channels += ['sure.r', 'sure.g', 'sure.b']
+   return channels
+ 
+ def get_dataset_channels(features):
+@@ -58,10 +65,14 @@ def shuffle_channels(channels, first_channel, order, num_channels=None):
+ # Checks whether the image with specified features exists
+ def image_exists(name, features):
+   suffixes = features.copy()
+-  if 'sh1' in suffixes:
+-    suffixes.remove('sh1')
+-    suffixes += ['sh1x', 'sh1y', 'sh1z']
+-  return all([os.path.isfile(name + '.' + s + '.exr') for s in suffixes])
++  if os.path.isfile(name + '.exr'):
++    exr_features = list_exr_features(name + '.exr')
++    return all((s in exr_features or os.path.isfile(name + '.' + s + '.exr')) for s in suffixes)
++  else:
++    if 'sh1' in suffixes:
++      suffixes.remove('sh1')
++      suffixes += ['sh1x', 'sh1y', 'sh1z']
++    return all([os.path.isfile(name + '.' + s + '.exr') for s in suffixes])
+ 
+ # Returns the feature an image represents given its filename
+ def get_image_feature(filename):
+@@ -85,12 +96,31 @@ def get_image_feature(filename):
+ def load_image_features(name, features):
+   images = []
+ 
++  class ImageLoader:
++    def __init__(self, name):
++      self.name = name
++      self.image = oiio.ImageBuf(name + '.exr') if os.path.isfile(name + '.exr') else None
++    def load_feature(self, feature):
++      if self.image:
++        for feature_channels in FEATURES[feature]:
++          if set(feature_channels).issubset(self.image.spec().channelnames):
++            return oiio.ImageBufAlgo.channels(self.image, feature_channels).get_pixels()
++      return load_image(self.name + f'.{feature}.exr')
++
++  image_loader = ImageLoader(name)
++
+   # HDR color
+   if 'hdr' in features:
+-    hdr = load_image(name + '.hdr.exr', num_channels=3)
++    hdr = image_loader.load_feature('hdr')
+     hdr = np.maximum(hdr, 0.)
+     images.append(hdr)
+ 
++  # Denoised color
++  if 'den' in features:
++    den = image_loader.load_feature('den')
++    den = np.maximum(den, 0.)
++    images.append(den)
++
+   # LDR color
+   if 'ldr' in features:
+     ldr = load_image(name + '.ldr.exr', num_channels=3)
+@@ -114,13 +144,13 @@ def load_image_features(name, features):
+ 
+   # Albedo
+   if 'alb' in features:
+-    albedo = load_image(name + '.alb.exr', num_channels=3)
++    albedo = image_loader.load_feature('alb')
+     albedo = np.clip(albedo, 0., 1.)
+     images.append(albedo)
+ 
+   # Normal
+   if 'nrm' in features:
+-    normal = load_image(name + '.nrm.exr', num_channels=3)
++    normal = image_loader.load_feature('nrm')
+     normal = np.clip(normal, -1., 1.)
+     
+     # Transform to [0..1] range
+@@ -128,6 +158,17 @@ def load_image_features(name, features):
+ 
+     images.append(normal)
+ 
++  if 'var' in features:
++    variance = image_loader.load_feature('var')
++    variance = np.nan_to_num(variance, nan=0., posinf=0., neginf=0.)
++    variance = np.clip(variance, 0., None)
++    images.append(variance)
++
++  if 'sure' in features:
++    sure = image_loader.load_feature('sure')
++    sure = np.nan_to_num(sure, nan=0., posinf=0., neginf=0.)
++    images.append(sure)
++
+   # Concatenate all feature images into one image
+   return np.concatenate(images, axis=2)
+ 
+@@ -156,7 +197,7 @@ def get_data_dir(cfg, name):
+ # Returns groups of image samples (input and target images at different SPPs) as
+ # a list of (group name, list of input names, target name)
+ def get_image_sample_groups(dir, input_features, target_features=None):
+-  image_filenames = glob(os.path.join(dir, '**', '*.*.exr'), recursive=True)
++  image_filenames = glob(os.path.join(dir, '**', '*.exr'), recursive=True)
+   if target_features is None:
+     target_features = [get_main_feature(input_features)]
+ 
+@@ -164,7 +205,7 @@ def get_image_sample_groups(dir, input_features, target_features=None):
+   image_groups = defaultdict(set)
+   for filename in image_filenames:
+     image_name = os.path.relpath(filename, dir)  # remove dir path
+-    image_name, _, _ = image_name.rsplit('.', 2) # remove extensions
++    image_name = image_name.split('.')[0] # remove extensions
+     group = image_name
+     if '_' in image_name:
+       prefix, suffix = image_name.rsplit('_', 1)
+@@ -277,6 +318,7 @@ class PreprocessedDataset(Dataset):
+     data_dir = get_preproc_data_dir(cfg, name)
+     data_cfg = load_config(data_dir)
+ 
++    self.cfg = cfg
+     self.tile_size = cfg.tile_size
+ 
+     # Get the features
+@@ -339,12 +381,26 @@ class TrainingDataset(PreprocessedDataset):
+     input_channels = self.channels[:] # copy
+ 
+     # Randomly permute the color channels
+-    color_features = list(set(self.features) & {'hdr', 'ldr', 'alb'})
++    color_features = list(set(self.features) & {'hdr', 'ldr', 'alb', 'den', 'var', 'sure'})
+     if color_features:
+       color_order = randperm(3)
+       for f in color_features:
+         shuffle_channels(input_channels, f+'.r', color_order)
+ 
++    # Randomly swap denoised and rendered color and variance channels
++    if self.cfg.shuffle_den:
++      if 'hdr' in self.features and 'den' in self.features:
++        if rand() < 0.5:
++          hdr_indices = get_channel_indices(['hdr.r', 'hdr.g', 'hdr.b'], input_channels)
++          den_indices = get_channel_indices(['den.r', 'den.g', 'den.b'], input_channels)
++          for i,j in zip(hdr_indices, den_indices):
++            input_channels[i], input_channels[j] = input_channels[j], input_channels[i]
++          if 'var' in self.features and 'sure' in self.features:
++            var_indices = get_channel_indices([ 'var.r', 'var.g', 'var.b'], input_channels)
++            sure_indices= get_channel_indices(['sure.r','sure.g','sure.b'], input_channels)
++            for i,j in zip(var_indices, sure_indices):
++              input_channels[i], input_channels[j] = input_channels[j], input_channels[i]
++
+     # Randomly permute the L1 SH coefficients and keep only 3 of them
+     if 'sh1' in self.features:
+       sh1_order = randperm(9)
+@@ -358,6 +414,7 @@ class TrainingDataset(PreprocessedDataset):
+     # Get the indices of the input and target channels
+     input_channel_indices  = get_channel_indices(input_channels, self.all_channels)
+     target_channel_indices = input_channel_indices[:self.num_main_channels]
++    target_channel_indices = [i % 3 for i in target_channel_indices]  # dirty workaround
+     #print(input_channels, input_channel_indices)
+ 
+     # Crop the input and target images
+@@ -395,11 +452,11 @@ class TrainingDataset(PreprocessedDataset):
+     input_image  = np.pad(input_image,  pad_size, mode='constant')
+     target_image = np.pad(target_image, pad_size, mode='constant')
+ 
+-    # Randomly zero the main feature channels if there are auxiliary features
+-    # This prevents "ghosting" artifacts when the main feature is entirely black
+-    if self.aux_features and rand() < 0.01:
+-      input_image[:, :, 0:self.num_main_channels] = 0
+-      target_image[:] = 0
++    # # Randomly zero the main feature channels if there are auxiliary features
++    # # This prevents "ghosting" artifacts when the main feature is entirely black
++    # if self.aux_features and rand() < 0.01:
++    #   input_image[:, :, 0:self.num_main_channels] = 0
++    #   target_image[:] = 0
+ 
+     # DEBUG: Save the tile
+     #save_image('tile_%d.png' % index, target_image)
+diff --git a/training/image.py b/training/image.py
+index 87ddf26..0fc60a9 100644
+--- a/training/image.py
++++ b/training/image.py
+@@ -81,7 +81,7 @@ def save_image(filename, image):
+     output = oiio.ImageOutput.create(filename)
+     if not output:
+       raise RuntimeError('could not create image: "' + filename + '"')
+-    format = oiio.FLOAT if ext == 'exr' else oiio.UINT8
++    format = oiio.HALF if ext == 'exr' else oiio.UINT8
+     spec = oiio.ImageSpec(image.shape[1], image.shape[0], image.shape[2], format)
+     if ext == 'exr':
+       spec.attribute('compression', 'piz')
+diff --git a/training/infer.py b/training/infer.py
+index 1be3745..34a4585 100755
+--- a/training/infer.py
++++ b/training/infer.py
+@@ -18,19 +18,21 @@ from result import *
+ # Inference function object
+ class Infer(object):
+   def __init__(self, cfg, device, result=None):
++    self.cfg = cfg
++
+     # Load the result config
+     result_dir = get_result_dir(cfg, result)
+     if not os.path.isdir(result_dir):
+       error('result does not exist')
+-    result_cfg = load_config(result_dir)
+-    self.features = result_cfg.features
++    self.result_cfg = load_config(result_dir)
++    self.features = self.result_cfg.features
+     self.main_feature = get_main_feature(self.features)
+     self.aux_features = get_aux_features(self.features)
+     self.all_channels = get_dataset_channels(self.features)
+     self.num_main_channels = len(get_dataset_channels(self.main_feature))
+ 
+     # Initialize the model
+-    self.model = get_model(result_cfg)
++    self.model = get_model(self.result_cfg)
+     self.model.to(device)
+ 
+     # Load the checkpoint
+@@ -38,7 +40,7 @@ class Infer(object):
+     self.epoch = checkpoint['epoch']
+ 
+     # Initialize the transfer function
+-    self.transfer = get_transfer_function(result_cfg)
++    self.transfer = get_transfer_function(self.result_cfg)
+ 
+     # Set the model to evaluation mode
+     self.model.eval()
+@@ -57,11 +59,17 @@ class Infer(object):
+     image = input.clone()
+ 
+     # Apply the transfer function
+-    color = image[:, 0:self.num_main_channels, ...]
+-    if self.main_feature == 'hdr':
+-      color *= exposure
+-    color = self.transfer.forward(color)
+-    image[:, 0:self.num_main_channels, ...] = color
++    for feature in self.result_cfg.features:
++      if feature in self.result_cfg.features_transfer:
++        transfer = get_transfer_function(self.result_cfg, feature)
++        channels = sorted(get_channel_indices(get_channels([feature], 'model'), get_model_channels(self.result_cfg.features)))
++        values = image[:, channels[0]:(channels[-1] + 1), ...]
++        if feature == 'hdr':
++          values *= exposure
++        if type(transfer) is LogTransferFunction:
++          values = torch.clamp(values, min=0.)
++        values = transfer.forward(values)
++        image[:, channels[0]:(channels[-1] + 1), ...] = values
+ 
+     # Pad the output
+     shape = image.shape
+@@ -98,6 +106,27 @@ class Infer(object):
+         
+     return image
+ 
++  def compute_sure(self, input, variance, exposure=1.):
++
++    channels = sorted(get_channel_indices(get_channels([self.main_feature], 'model'),
++                                          get_model_channels(self.result_cfg.features)))
++
++    F_x = self.__call__(input, exposure)
++
++    eps = 1e-4
++    sure = torch.zeros_like(variance)
++    for _ in range(self.cfg.sure_mc_iterations):
++      x_plus_eps_b = input.clone()
++      b = torch.normal(torch.zeros_like(variance), torch.sqrt(variance))
++      x_plus_eps_b[:, channels[0]:(channels[-1] + 1), ...] += eps * b
++      F_x_plus_eps_b = self.__call__(x_plus_eps_b, exposure)
++
++      sure += b * (F_x_plus_eps_b - F_x)
++    sure *= 2. / (eps * float(self.cfg.sure_mc_iterations))
++    sure += torch.square(F_x - input[:, channels[0]:(channels[-1] + 1), ...]) - variance
++
++    return sure
++
+ def main():
+   # Parse the command line arguments
+   cfg = parse_args(description='Performs inference on a dataset using the specified training result.')
+@@ -128,17 +157,16 @@ def main():
+         save_images(path, image[:, i:i+3, ...], image_srgb[:, i:i+3, ...], 'sh1' + axis)
+       return
+ 
+-    image      = tensor_to_image(image)
+-    image_srgb = tensor_to_image(image_srgb)
+     filename_prefix = path + '.' + feature_ext + '.'
+     for format in cfg.format:
+       if format in {'exr', 'pfm', 'phm', 'hdr'}:
+         # Transform to original range
++        image = tensor_to_image(image)
+         if infer.main_feature in {'sh1', 'nrm'}:
+           image = image * 2. - 1. # [0..1] -> [-1..1]
+         save_image(filename_prefix + format, image)
+       else:
+-        save_image(filename_prefix + format, image_srgb)
++        save_image(filename_prefix + format, tensor_to_image(image_srgb))
+ 
+   with torch.no_grad():
+     for group, input_names, target_name in image_sample_groups:
+@@ -168,12 +196,17 @@ def main():
+         input = load_image_features(os.path.join(data_dir, input_name), infer.features)
+ 
+         # Compute the autoexposure value
+-        exposure = autoexposure(input) if infer.main_feature == 'hdr' else 1.
++        exposure = 1. #autoexposure(input) if infer.main_feature == 'hdr' else 1.
+ 
+         # Infer
+         input = image_to_tensor(input, batch=True).to(device)
+         output = infer(input, exposure)
+ 
++        if cfg.compute_sure:
++          variance = load_image_features(os.path.join(data_dir, input_name), ['var'])
++          variance = image_to_tensor(variance, batch=True).to(device)
++          sure_image = infer.compute_sure(input, variance, exposure)
++
+         input = input[:, 0:infer.num_main_channels, ...] # keep only the main feature
+         input_srgb  = transform_feature(input,  infer.main_feature, 'srgb', tonemap_exposure)
+         output_srgb = transform_feature(output, infer.main_feature, 'srgb', tonemap_exposure)
+@@ -182,7 +215,7 @@ def main():
+         metric_str = ''
+         if target_name and cfg.metric:
+           for metric in cfg.metric:
+-            value = compare_images(output_srgb, target_srgb, metric)
++            value = compare_images(output, target, metric)
+             metric_sum[metric] += value
+             if metric_str:
+               metric_str += ', '
+@@ -198,6 +231,10 @@ def main():
+           save_images(os.path.join(output_dir, input_name), input, input_srgb)
+         save_images(os.path.join(output_dir, output_name), output, output_srgb)
+ 
++        if cfg.compute_sure:
++          metric_str += f', SURE={torch.mean(sure_image).item():.4f}'
++          save_images(os.path.join(output_dir, output_name), sure_image, None, feature_ext='sure')
++
+         # Print metrics
+         if metric_str:
+           metric_str = ' ' + metric_str
+diff --git a/training/model.py b/training/model.py
+index c5ba847..4d54ac6 100644
+--- a/training/model.py
++++ b/training/model.py
+@@ -1,5 +1,6 @@
+ ## Copyright 2018-2021 Intel Corporation
+ ## SPDX-License-Identifier: Apache-2.0
++import os.path
+ 
+ import numpy as np
+ import torch
+@@ -8,12 +9,18 @@ import torch.nn.functional as F
+ 
+ from dataset import *
+ from util import *
++from color import *
++import __main__
+ 
+ def get_model(cfg):
+   type = cfg.model
+   num_input_channels = len(get_model_channels(cfg.features))
+   if type == 'unet':
+-    return UNet(num_input_channels)
++    return UNet(cfg, num_input_channels)
++  elif type == 'pdnet':
++    return PDNet(cfg)
++  elif type == 'kpcn':
++    return KPCN(num_input_channels)
+   else:
+     error('invalid model')
+ 
+@@ -22,8 +29,8 @@ def get_model(cfg):
+ ## -----------------------------------------------------------------------------
+ 
+ # 3x3 convolution module
+-def Conv(in_channels, out_channels):
+-  return nn.Conv2d(in_channels, out_channels, 3, padding=1)
++def Conv(in_channels, out_channels, kernel_size=3, padding=1):
++  return nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)
+ 
+ # ReLU function
+ def relu(x):
+@@ -46,9 +53,11 @@ def concat(a, b):
+ ## -----------------------------------------------------------------------------
+ 
+ class UNet(nn.Module):
+-  def __init__(self, in_channels=3, out_channels=3):
++  def __init__(self, cfg, in_channels=3, out_channels=3):
+     super(UNet, self).__init__()
+ 
++    self.cfg = cfg
++
+     # Number of channels per layer
+     ic   = in_channels
+     ec1  = 32
+@@ -131,4 +140,193 @@ class UNet(nn.Module):
+ 
+     x = self.dec_conv0(x)            # dec_conv0
+ 
+-    return x
+\ No newline at end of file
++    return x
++
++class PDNet(nn.Module):
++  def __init__(self, cfg):
++    super(PDNet, self).__init__()
++
++    self.cfg = cfg
++    self.channels = get_model_channels(cfg.features)
++    assert len(self.channels) == 12
++
++    self.hdr_channels = sorted(get_channel_indices(['hdr.r', 'hdr.g', 'hdr.b'], self.channels))
++    self.den_channels = sorted(get_channel_indices(['den.r', 'den.g', 'den.b'], self.channels))
++    self.var_channels = sorted(get_channel_indices(['var.r', 'var.g', 'var.b'], self.channels))
++    self.sure_channels = sorted(get_channel_indices(['sure.r', 'sure.g', 'sure.b'], self.channels))
++
++    self.conv_i = Conv(12 + 6, 48, 5, 2)
++    self.res_1_conv_1 = Conv(48, 48, 3, 1)
++    self.res_1_conv_2 = Conv(48, 48, 3, 1)
++    self.res_2_conv_1 = Conv(48, 48, 3, 1)
++    self.res_2_conv_2 = Conv(48, 48, 3, 1)
++    self.conv_o = Conv(48, 9, 3, 1)
++
++    self.alignment = 4
++    # The following assumptions are hardcoded in forward(self,...) for simplicity
++    assert cfg.features_transfer['hdr'] == 'linear' and cfg.features_transfer['den'] == 'linear' and \
++           cfg.features_transfer['var'] == 'atan' and cfg.features_transfer['sure'] == 'atan'
++
++  def t_test(self, alpha, hdr, den, var, params=(2.0, 4.2), device=None):
++
++    blur_size = 11
++    blur_sigma = 100
++    blur_sigma *= torch.sqrt(torch.clamp(torch.mean(var), 0, 1))
++    blur_sigma = torch.clamp(blur_sigma, 1e-3)
++
++    pad = (int((blur_size - 1) / 2), int((blur_size - 1) / 2))
++    weights = torch.zeros((1, 3, blur_size, blur_size), device=device)
++    for i in range(blur_size):
++      x = float(i - (blur_size - 1) / 2)
++      for j in range(blur_size):
++        y = float(j - (blur_size - 1) / 2)
++        weights[0, 0, i, j] = torch.exp(-0.5 * (x ** 2 + y ** 2) / (blur_sigma ** 2))
++        weights[0, 1, i, j] = torch.exp(-0.5 * (x ** 2 + y ** 2) / (blur_sigma ** 2))
++        weights[0, 2, i, j] = torch.exp(-0.5 * (x ** 2 + y ** 2) / (blur_sigma ** 2))
++    weights /= blur_sigma * np.sqrt(2 * np.pi)
++
++    hdr_blur = torch.conv2d(hdr, weights, padding=pad)
++    den_blur = torch.conv2d(hdr + alpha * (den - hdr), weights, padding=pad)
++    var_blur = torch.conv2d(var, torch.square(weights), padding=pad)
++
++    maxpool2d = torch.nn.MaxPool2d(blur_size, stride=1, padding=pad, dilation=1, return_indices=True)
++    var_max, indices = maxpool2d(var)
++    var_blur = var_blur + torch.sum(var_max, dim=1, keepdim=True) / 9.
++
++    def retrieve_elements_from_indices(tensor, indices):
++      flattened_tensor = tensor.flatten(start_dim=1)
++      output = flattened_tensor.gather(dim=1, index=indices.flatten(start_dim=1)).view_as(indices)
++      return torch.sum(output, dim=1, keepdim=True) / 3.
++
++    var_blur = torch.clamp(var_blur, min=0)
++    hdr_blur += retrieve_elements_from_indices(hdr, indices)
++    den_blur += retrieve_elements_from_indices(hdr + alpha * (den - hdr), indices)
++
++    t = torch.abs(den_blur - hdr_blur) / (torch.sqrt(var_blur) + 1e-6)
++    return alpha * 0.5 * (1 - torch.erf(params[0] * (t - params[1]) / np.sqrt(2)))
++
++  def forward(self, input):
++
++    device = input.get_device()
++    if device == -1:
++      device = torch.device('cpu')
++    transfer = AtanTransferFunction()
++
++    hdr = input[:, self.hdr_channels, :, :]
++    den = input[:, self.den_channels, :, :]
++    var = transfer.inverse(input[:, self.var_channels, :, :])
++    sure = transfer.inverse(input[:, self.sure_channels, :, :])
++
++    # Concatenate ||x-y||^2 and 2*sigma^2*f'(x)
++    # Apply Atan Transfer Function
++    # -----------------------------------------
++    sqerr = torch.square(hdr - den)
++    input = torch.cat((input, transfer.forward(sqerr), transfer.forward(sure + var - sqerr)), dim=1)
++
++    # Residual Layers and Target Output
++    # -----------------------------------------
++    x = self.conv_i(input)
++    x = x_skip = relu(x)
++
++    x = self.res_1_conv_1(x)
++    x = self.res_1_conv_2(relu(x)) + x_skip
++    x = x_skip = relu(x)
++
++    x = self.res_2_conv_1(x)
++    x = self.res_2_conv_2(relu(x)) + x_skip
++    x = relu(x)
++
++    x = self.conv_o(x)
++
++    # Compute Alpha
++    # -----------------------------------------
++    x1, x2, x3 = torch.split(x, [3, 3, 3], dim=1)
++    alpha = (x1 - x2) / torch.clamp(x3, min=1e-6)
++    alpha = torch.clip(alpha, min=0., max=1.)
++
++    # Compute t-Statistic and Scale Alpha
++    # -----------------------------------------
++    if 'infer' in str(__main__):
++      alpha = self.t_test(alpha, hdr, den, var, device=device)
++
++    return hdr + alpha * (den - hdr)
++
++## -----------------------------------------------------------------------------
++## KPCN model
++## -----------------------------------------------------------------------------
++
++class KPCN(nn.Module):
++  def __init__(self, in_channels=3, out_channels=3):
++    super(KPCN, self).__init__()
++
++    self.kernel_half_size = 2
++    self.kernel_size = (2 * self.kernel_half_size + 1) ** 2
++
++    # Number of output channels per layer
++    ic    = in_channels
++    kpni  = 80
++    kpn1  = 80
++    kpn2  = 80
++    kpn3  = 80
++    kpn4  = 80
++    kpno  = 3 + self.kernel_size
++
++    # Convolutions (should use 'same' for padding, but unavailable until pytorch 1.9)
++    conv_padding = 2
++    self.kpn_convi = Conv(ic,   kpni, 5, (conv_padding, conv_padding))
++    self.kpn_conv1 = Conv(kpni, kpn1, 5, (conv_padding, conv_padding))
++    self.kpn_conv2 = Conv(kpn1, kpn2, 5, (conv_padding, conv_padding))
++    self.kpn_conv3 = Conv(kpn2, kpn3, 5, (conv_padding, conv_padding))
++    self.kpn_conv4 = Conv(kpn3, kpn4, 5, (conv_padding, conv_padding))
++    self.kpn_convo = Conv(kpn4, kpno, 5, (conv_padding, conv_padding))
++
++    # Reflection padding
++    self.edge_pad = torch.nn.ReflectionPad2d(self.kernel_half_size)
++    self.unfold = torch.nn.Unfold((2 * self.kernel_half_size + 1, 2 * self.kernel_half_size + 1))
++    self.softmax = torch.nn.Softmax(dim=1)
++
++    self.alignment = 4
++
++  def forward(self, input):
++
++    b,c,h,w = input.size()
++    device = input.get_device()
++
++    # KPCN
++    # -----------------------------------------
++
++    x = relu(self.kpn_convi(input))
++    x = relu(self.kpn_conv1(x))
++    x = relu(self.kpn_conv2(x))
++    x = relu(self.kpn_conv3(x))
++    x = relu(self.kpn_conv4(x))
++    x = self.kpn_convo(x)
++
++    aff, kernel_weights = torch.split(x, [3, self.kernel_size], 1)
++
++    # Normalize Kernel Weights
++    # -----------------------------------------
++
++    kernel_weights = self.softmax(kernel_weights)
++
++    # Extract Main Color Channels [0-2]
++    # -----------------------------------------
++
++    color, _ = torch.split(input, [3, c - 3], 1)
++    residual = aff - color
++
++    # Apply Kernel
++    # -----------------------------------------
++
++    residual = self.edge_pad(residual)
++    output_size = residual.shape
++
++    kernel_weights = torch.flatten(kernel_weights, 2)
++    kernel_weights = kernel_weights.repeat(1, 3, 1)
++
++    kernel_output = kernel_weights * self.unfold(residual)
++    kernel_output = torch.nn.functional.fold(kernel_output, (output_size[2], output_size[3]),
++                                             (2 * self.kernel_half_size + 1, 2 * self.kernel_half_size + 1))
++
++    return color + kernel_output[:, :, (self.kernel_half_size):(-self.kernel_half_size),
++                                       (self.kernel_half_size):(-self.kernel_half_size)]
+diff --git a/training/preprocess.py b/training/preprocess.py
+index d95eeed..6969b2a 100755
+--- a/training/preprocess.py
++++ b/training/preprocess.py
+@@ -36,33 +36,39 @@ def main():
+     target_features = [main_feature]
+ 
+   # Returns a preprocessed image (also changes the original image!)
+-  def preprocess_image(image, exposure):
+-    # Apply the transfer function
+-    color = image[..., 0:num_main_channels]
+-    color = torch.from_numpy(color).to(device)
+-    if main_feature == 'hdr':
+-      color *= exposure
+-    color = transfer.forward(color)
+-    color = torch.clamp(color, max=1.)
+-    color = color.cpu().numpy()
+-    image[..., 0:num_main_channels] = color
++  def preprocess_image(image, exposure=1.0, target=False):
++
++    for feature in cfg.features:
++      if target and feature != get_main_feature(cfg.features):
++        continue
++      if feature in cfg.features_transfer:
++        transfer = get_transfer_function(cfg, feature)
++        channels = sorted(get_channel_indices(get_channels([feature], 'model'), get_model_channels(cfg.features)))
++        values = image[..., channels[0]:(channels[-1] + 1)]
++        values = torch.from_numpy(values).to(device)
++        values *= exposure
++        if type(transfer) is LogTransferFunction:
++          values = torch.clamp(values, min=0.)
++        values = transfer.forward(values)
++        values = values.cpu().numpy()
++        image[..., channels[0]:(channels[-1] + 1)] = values
+ 
+     # Convert to FP16
+-    return np.nan_to_num(image.astype(np.float16))
++    return np.nan_to_num(image.astype(np.float16), posinf=0, neginf=0)
+ 
+   # Preprocesses a group of input and target images at different SPPs
+   def preprocess_sample_group(input_dir, output_tza, input_names, target_name):
+     samples = []
+ 
+     # Load the target image
+-    print(target_name)
++    # print(target_name)
+     target_image = load_image_features(os.path.join(input_dir, target_name), target_features)
+ 
+     # Compute the autoexposure value
+-    exposure = autoexposure(target_image) if main_feature == 'hdr' else 1.
++    exposure = 1. #autoexposure(target_image) if main_feature == 'hdr' else 1.
+ 
+     # Preprocess the target image
+-    target_image = preprocess_image(target_image, exposure)
++    target_image = preprocess_image(target_image, exposure, target=True)
+ 
+     # Save the target image
+     output_tza.write(target_name, target_image, 'hwc')
+@@ -70,7 +76,7 @@ def main():
+     # Process the input images
+     for input_name in input_names:
+       # Load the image
+-      print(input_name)
++      # print(input_name)
+       input_image = load_image_features(os.path.join(input_dir, input_name), input_features)
+ 
+       if input_image.shape[0:2] != target_image.shape[0:2]:
+@@ -104,10 +110,14 @@ def main():
+     sample_groups = get_image_sample_groups(input_dir, input_features, target_features)
+     tza_filename = os.path.join(output_dir, 'images.tza')
+     samples = []
++    assert len(sample_groups) > 0
++    pb = ProgressBar(len(sample_groups))
+     with tza.Writer(tza_filename) as output_tza:
+       for _, input_names, target_name in sample_groups:
+         if target_name:
+           samples += preprocess_sample_group(input_dir, output_tza, input_names, target_name)
++        pb.next()
++    pb.finish()
+ 
+     # Save the samples in the dataset
+     samples_filename = os.path.join(output_dir, 'samples.json')
+diff --git a/training/split_exr.py b/training/split_exr.py
+index eee764b..735424b 100755
+--- a/training/split_exr.py
++++ b/training/split_exr.py
+@@ -10,6 +10,52 @@ import OpenImageIO as oiio
+ 
+ from config import *
+ 
++FEATURES = {
++    'hdr': [
++        ('R', 'G', 'B'),
++        ('Noisy Image.R', 'Noisy Image.G', 'Noisy Image.B'),
++        ('Beauty.R', 'Beauty.G', 'Beauty.B')
++    ],
++    'den': [],
++    'a': [('A',)],
++    'alb': [
++        ('albedo.R', 'albedo.G', 'albedo.B'),
++        ('Albedo.R', 'Albedo.G', 'Albedo.B'),
++        ('Denoising Albedo.R', 'Denoising Albedo.G', 'Denoising Albedo.B'),
++        ('VisibleDiffuse.R', 'VisibleDiffuse.G', 'VisibleDiffuse.B'),
++        ('diffuse.R', 'diffuse.G', 'diffuse.B'),
++        ('DiffCol.R', 'DiffCol.G', 'DiffCol.B'),
++    ],
++    'nrm': [
++        ('normal.R', 'normal.G', 'normal.B'),
++        ('Normal.X', 'Normal.Y', 'Normal.Z'),
++        ('N.R', 'N.G', 'N.B'),
++        ('Denoising Normal.X', 'Denoising Normal.Y', 'Denoising Normal.Z'),
++        ('Normals.R', 'Normals.G', 'Normals.B'),
++        ('VisibleNormals.R', 'VisibleNormals.G', 'VisibleNormals.B'),
++        ('OptixNormals.R', 'OptixNormals.G', 'OptixNormals.B'),
++    ],
++    'var': [
++        ('Variance.R', 'Variance.B', 'Variance.G')
++    ],
++    'sure': [],
++    'z': [('Denoising Depth.Z',)]
++}
++
++def list_exr_features(name):
++    image_features = []
++    image = oiio.ImageInput.open(name)
++    if not image:
++        return []
++    channels = image.spec().channelnames
++    for feature, feature_channel_lists in FEATURES.items():
++        for feature_channels in feature_channel_lists:
++            if set(feature_channels).issubset(channels):
++                image_features.append(feature)
++                break
++    image.close()
++    return image_features
++
+ def main():
+   # Parse the command-line arguments
+   cfg = parse_args(description='Splits a multi-channel EXR image into multiple feature images.')
+@@ -40,31 +86,6 @@ def main():
+     cfg.layer = list(layer_channels.keys())[0]
+ 
+   # Extract features
+-  FEATURES = {
+-    'hdr' : [
+-              ('R', 'G', 'B'),
+-              ('Noisy Image.R', 'Noisy Image.G', 'Noisy Image.B'),
+-              ('Beauty.R', 'Beauty.G', 'Beauty.B')
+-            ],
+-    'a' : [('A',)],
+-    'alb' : [
+-              ('albedo.R', 'albedo.G', 'albedo.B'),
+-              ('Denoising Albedo.R', 'Denoising Albedo.G', 'Denoising Albedo.B'),
+-              ('VisibleDiffuse.R', 'VisibleDiffuse.G', 'VisibleDiffuse.B'),
+-              ('diffuse.R', 'diffuse.G', 'diffuse.B'),
+-              ('DiffCol.R', 'DiffCol.G', 'DiffCol.B'),
+-            ],
+-    'nrm' : [
+-              ('normal.R', 'normal.G', 'normal.B'),
+-              ('N.R', 'N.G', 'N.B'),
+-              ('Denoising Normal.X', 'Denoising Normal.Y', 'Denoising Normal.Z'),
+-              ('Normals.R', 'Normals.G', 'Normals.B'),
+-              ('VisibleNormals.R', 'VisibleNormals.G', 'VisibleNormals.B'),
+-              ('OptixNormals.R', 'OptixNormals.G', 'OptixNormals.B'),
+-            ],
+-    'z' : [('Denoising Depth.Z',)]
+-  }
+-
+   for feature, feature_channel_lists in FEATURES.items():
+     for feature_channels in feature_channel_lists:
+       # Check whether the feature is present in the selected layer of the image
