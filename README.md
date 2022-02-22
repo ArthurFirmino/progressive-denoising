@@ -1,15 +1,15 @@
 # Progressive Denoising of Monte Carlo Rendered Images
 
-##(To be presented in Computer Graphics Forum, EG 2022)
+## (To be presented in Computer Graphics Forum, EG 2022)
 
 ---
 
-###Abstract
+### Abstract
 Image denoising based on deep learning has become a powerful tool to accelerate Monte Carlo rendering. Deep learning techniques can produce smooth images using a low sample count. Unfortunately, existing deep learning methods are biased and do not converge to the correct solution as the number of samples increase. In this paper, we propose a progressive denoising technique that aims to use denoising only when it is beneficial and to reduce its impact at high sample counts. We use Stein's unbiased risk estimate (SURE) to estimate the error in the denoised image, and we combine this with a neural network to infer a per-pixel mixing parameter. We further augment this network with confidence intervals based on classical statistics to ensure consistency and convergence of the final denoised image. Our results demonstrate that our method is consistent and that it improves existing denoising techniques. Furthermore, it can be used in combination with existing high quality denoisers to ensure consistency. In addition to being asymptotically unbiased, progressive denoising is particularly good at preserving fine details that would otherwise be lost with existing denoisers.
 
 ---
 
-###Links
+### Links
 
 * Paper: [pending]
 * Supplement: [pending]
@@ -17,7 +17,7 @@ Image denoising based on deep learning has become a powerful tool to accelerate 
 
 ---
 
-###Dependencies (Tested only on Debian 11)
+### Dependencies (Tested only on Debian 11)
 
 + python (>=3.7, tested 3.9.2)
 + numpy (>=1.8, tested 1.21.0)
@@ -25,7 +25,7 @@ Image denoising based on deep learning has become a powerful tool to accelerate 
 + tqdm (tested 4.61.1)
 + python3-openimageio (>=2.1, tested 2.2.10)
 
-###Data
+### Data
 
 ---
 
@@ -40,7 +40,7 @@ The following is made available on [Google Drive](https://drive.google.com/drive
 
 ---
 
-###Code & Scripts
+### Code & Scripts
 
 The code builds upon that of [OpenImageDenoise](https://github.com/OpenImageDenoise/oidn), and all changes are contained in the `oidn_patch/pd.patch` file, which can be applied as follows:
 
@@ -90,6 +90,6 @@ The directory structure is as follows:
 
 ---
 
-###Citation
+### Citation
 
 [pending]
