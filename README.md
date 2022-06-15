@@ -1,7 +1,5 @@
 # Progressive Denoising of Monte Carlo Rendered Images
 
-## (To be presented in Computer Graphics Forum, EG 2022)
-
 ---
 
 ### Abstract
@@ -11,9 +9,8 @@ Image denoising based on deep learning has become a powerful tool to accelerate 
 
 ### Links
 
-* Paper: [pending]
-* Supplement: [pending]
-* Results Viewer: [pending]
+* Paper: [Highres](https://people.compute.dtu.dk/jerf/papers/progdenoising.pdf), [Lowres](https://people.compute.dtu.dk/jerf/papers/progdenoising_lowres.pdf), [Publisher](https://doi.org/10.1111/cgf.14454)
+* Supplement: [Highres](https://people.compute.dtu.dk/jerf/papers/progdenoising_suppl.pdf)
 
 ---
 
@@ -25,9 +22,9 @@ Image denoising based on deep learning has become a powerful tool to accelerate 
 + tqdm (tested 4.61.1)
 + python3-openimageio (>=2.1, tested 2.2.10)
 
-### Data
-
 ---
+
+### Data
 
 The following is made available on [Google Drive](https://drive.google.com/drive/folders/1-8sBlpvkKVkwrZsZqnPQbU1ozrUXSxOo):
 
@@ -92,4 +89,15 @@ The directory structure is as follows:
 
 ### Citation
 
-[pending]
+```
+@inproceedings{firmino2022progressive,
+  title={Progressive Denoising of Monte Carlo Rendered Images},
+  author={Firmino, Arthur and Frisvad, Jeppe Revall and Jensen, Henrik Wann},
+  booktitle={Computer Graphics Forum},
+  volume={41},
+  number={2},
+  pages={1--11},
+  year={2022},
+  organization={Wiley Online Library}
+}
+```
